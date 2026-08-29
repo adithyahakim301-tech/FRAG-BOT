@@ -257,9 +257,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lock = asyncio.Lock()
     last_edit = time.time()
 
+    first_error = None
+
     async def worker_task(username):
-        nonlocal done_count, last_edit
-        status = await pool.check(username)
+        nonlocal done_count, last_edit, first_error
+        try:
+            status = await asyncio.wait_for(pool.check(username), timeout=30)
+        except Exception as e:
+            status = Status.ERROR
+            if first_error is None:
+                first_error = f"{type(e).__name__}: {e}"
+            print(f"[check error] @{username}: {type(e).__name__}: {e}")
+
         async with lock:
             done_count += 1
             now = time.time()
@@ -271,16 +280,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass  # kalau edit kena rate limit, abaikan aja, ga fatal
         return username, status
 
-    results = await asyncio.gather(*(worker_task(u) for u in usernames))
+    # return_exceptions biar 1 task gagal ga bikin semua task lain ke-abort
+    results = await asyncio.gather(
+        *(worker_task(u) for u in usernames), return_exceptions=True
+    )
+    # jaga2 kalau ada exception yang lolos sampai level ini juga
+    results = [
+        r if isinstance(r, tuple) else (usernames[i], Status.ERROR)
+        for i, r in enumerate(results)
+    ]
 
     available = [u for u, s in results if s == Status.AVAILABLE]
     frag_banned = [u for u, s in results if s in (Status.FRAGMENT, Status.BANNED)]
     taken_count = sum(1 for _, s in results if s == Status.TAKEN)
     invalid_count = sum(1 for _, s in results if s == Status.INVALID)
+    error_count = sum(1 for _, s in results if s == Status.ERROR)
 
     header = f"✅ Selesai cek {total} username\nTaken: {taken_count}"
     if invalid_count:
         header += f" | Invalid: {invalid_count}"
+    if error_count:
+        header += f" | Error: {error_count}"
+        if first_error:
+            header += f"\n⚠️ Contoh error: `{first_error}`"
 
     messages = [header]
     messages += build_list_messages("Available", available)
