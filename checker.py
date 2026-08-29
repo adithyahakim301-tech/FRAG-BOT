@@ -38,7 +38,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
-import httpx
+import fragment
+from fragment.errors import FragmentHTTPError, ParserError
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError, UsernameInvalidError, UsernameNotOccupiedError
 from telethon.tl.functions.contacts import ResolveUsernameRequest
@@ -46,14 +47,6 @@ from telethon.tl.functions.contacts import ResolveUsernameRequest
 # Aturan format username Telegram: 5-32 karakter, huruf/angka/underscore,
 # tidak boleh diawali angka.
 USERNAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]{4,31}$")
-
-FRAGMENT_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-}
 
 
 class Status:
@@ -143,29 +136,23 @@ class UsernamePool:
 
 async def check_fragment_listed(username: str) -> bool:
     """
-    Best-effort: cek apakah username muncul di fragment.com sebagai listing
-    (lelang aktif / sudah kejual / bisa ditawar). Kalau nggak ketemu sama
-    sekali, dianggap murni available.
+    Cek apakah username ini "milik" fragment.com (lagi dilelang, sudah
+    kejual/resale, dsb) -- pakai library python-fragment yang parsing
+    halamannya secara proper (bukan tebak dari og:title kayak sebelumnya).
 
-    Endpoint ini TIDAK resmi dan Fragment cukup sering ubah struktur HTML,
-    jadi ini fallback best-effort, bukan sumber kebenaran mutlak.
+    Logikanya: kalau fragment.com PUNYA data soal username ini (apapun
+    status-nya -- auction/sale/sold/dsb), berarti ini "milik" Fragment
+    dan harus dibeli lewat sana, bukan bisa langsung diklaim di Telegram.
+    Kalau fragment.com nggak punya data sama sekali (page nggak ke-parse /
+    404), berarti murni available.
     """
-    url = f"https://fragment.com/username/{username}"
     try:
-        async with httpx.AsyncClient(timeout=8, headers=FRAGMENT_HEADERS) as client:
-            r = await client.get(url, follow_redirects=True)
-        if r.status_code != 200:
-            return False
-
-        m = re.search(r'<meta property="og:title" content="([^"]*)"', r.text)
-        title = m.group(1).lower() if m else ""
-
-        return (
-            "auctions for usernames" in title
-            or title.startswith("buy @")
-            or "make an offer" in title
-        )
+        async with fragment.AsyncClient() as client:
+            info = await client.username_info(username)
+        return bool(info.get("status"))
+    except (FragmentHTTPError, ParserError):
+        return False
     except Exception:
-        # Kalau fragment.com error/timeout, jangan gagalkan seluruh cek --
-        # anggap saja tidak listed (fallback ke available).
+        # kalau fragment.com error/timeout, jangan gagalkan seluruh cek --
+        # anggap saja tidak listed (fallback ke available)
         return False
