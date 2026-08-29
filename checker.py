@@ -116,16 +116,15 @@ class UsernamePool:
             await asyncio.sleep(1)
             worker = self._pick_worker()
 
+        not_occupied = False
+
         async with worker.lock:
             await asyncio.sleep(self.min_delay + random.uniform(0, 0.6))
             try:
                 await worker.client(ResolveUsernameRequest(username))
                 return Status.TAKEN
             except UsernameNotOccupiedError:
-                # Bebas dari sisi Telegram, tapi masih perlu dicek Fragment
-                # buat mastiin ini beneran available atau cuma bisa dibeli.
-                is_listed = await check_fragment_listed(username)
-                return Status.FRAGMENT if is_listed else Status.AVAILABLE
+                not_occupied = True
             except UsernameInvalidError:
                 # Format lolos regex tapi Telegram bilang invalid.
                 # Kandidat kuat: username kena banned Telegram.
@@ -133,6 +132,13 @@ class UsernamePool:
             except FloodWaitError as e:
                 worker.cooldown_until = time.time() + e.seconds + 2
                 return await self.check(username, _depth + 1)
+
+        # Fragment.com dicek DI LUAR lock worker, supaya worker langsung
+        # bebas ngecek username lain -- nggak nunggu HTTP call ke fragment.com
+        # yang bisa makan waktu beberapa detik.
+        if not_occupied:
+            is_listed = await check_fragment_listed(username)
+            return Status.FRAGMENT if is_listed else Status.AVAILABLE
 
 
 async def check_fragment_listed(username: str) -> bool:
