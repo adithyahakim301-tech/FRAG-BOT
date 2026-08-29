@@ -262,7 +262,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async def worker_task(username):
         nonlocal done_count, last_edit, first_error
         try:
-            status = await asyncio.wait_for(pool.check(username), timeout=120)
+            status = await asyncio.wait_for(pool.check(username), timeout=240)
         except Exception as e:
             status = Status.ERROR
             if first_error is None:
