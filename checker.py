@@ -58,6 +58,13 @@ class Status:
     ERROR = "error"
 
 
+# Batasi request bersamaan ke fragment.com -- sekarang dicek untuk SEMUA
+# username (bukan cuma yang belum di-occupy), jadi volumenya jauh lebih
+# besar dari sebelumnya. Angka ini sengaja konservatif biar ga keblokir
+# Cloudflare-nya fragment.com.
+_FRAGMENT_SEM = asyncio.Semaphore(5)
+
+
 @dataclass
 class Worker:
     """Satu sesi Telethon (login via bot token)."""
@@ -109,29 +116,36 @@ class UsernamePool:
             await asyncio.sleep(1)
             worker = self._pick_worker()
 
-        not_occupied = False
+        occupied = False  # ada yang resolve (dipakai orang / banned), tapi belum tentu "normal taken"
 
         async with worker.lock:
             await asyncio.sleep(self.min_delay + random.uniform(0, 0.6))
             try:
-                await worker.client(ResolveUsernameRequest(username))
-                return Status.TAKEN
+                result = await worker.client(ResolveUsernameRequest(username))
+                entity = (result.chats or result.users or [None])[0]
+                if entity is not None and getattr(entity, "restricted", False):
+                    # Berhasil di-resolve TAPI ditandai restricted -> ini yang
+                    # muncul dialog "violated Telegram's Terms of Service."
+                    return Status.BANNED
+                occupied = True
             except UsernameNotOccupiedError:
-                not_occupied = True
+                occupied = False
             except UsernameInvalidError:
                 # Format lolos regex tapi Telegram bilang invalid.
-                # Kandidat kuat: username kena banned Telegram.
+                # Kandidat lain untuk banned (jarang, tapi jaga-jaga).
                 return Status.BANNED
             except FloodWaitError as e:
                 worker.cooldown_until = time.time() + e.seconds + 2
                 return await self.check(username, _depth + 1)
 
-        # Fragment.com dicek DI LUAR lock worker, supaya worker langsung
-        # bebas ngecek username lain -- nggak nunggu HTTP call ke fragment.com
-        # yang bisa makan waktu beberapa detik.
-        if not_occupied:
-            is_listed = await check_fragment_listed(username)
-            return Status.FRAGMENT if is_listed else Status.AVAILABLE
+        # Fragment.com dicek DI LUAR lock worker (supaya worker langsung bebas
+        # ngecek username lain), dan SEKARANG dicek juga walau usernamenya
+        # "occupied" -- soalnya username yang pernah dibeli lewat Fragment
+        # tetap "milik" Fragment walau lagi dipakai pemiliknya.
+        is_listed = await check_fragment_listed(username)
+        if is_listed:
+            return Status.FRAGMENT
+        return Status.TAKEN if occupied else Status.AVAILABLE
 
 
 async def check_fragment_listed(username: str) -> bool:
@@ -147,8 +161,9 @@ async def check_fragment_listed(username: str) -> bool:
     404), berarti murni available.
     """
     try:
-        async with fragment.AsyncClient() as client:
-            info = await client.username_info(username)
+        async with _FRAGMENT_SEM:
+            async with fragment.AsyncClient() as client:
+                info = await client.username_info(username)
         return bool(info.get("status"))
     except (FragmentHTTPError, ParserError):
         return False
