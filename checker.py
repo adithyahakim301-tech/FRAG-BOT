@@ -44,6 +44,7 @@ class Status:
     TAKEN = "taken"
     BANNED = "banned"
     INVALID = "invalid"
+    ERROR = "error"
 
 
 @dataclass
